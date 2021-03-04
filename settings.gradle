@@ -1,0 +1,5 @@
+include ':lazyload'
+include ':alihomeview'
+include ':customswipelayout'
+include ':app'
+rootProject.name = "CustomViewLearn"

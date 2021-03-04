@@ -1,0 +1,160 @@
+充分了解懒加载需熟悉Fragment 生命周期以及setUseVisibleHint 方法执行顺序
+
+
+
+执行流程 ：
+      setUseVisibleHint --> onAttach --> onCreate --> onCreateView --> onActivityCreate -->
+
+       onStart --> onResume -->  onPause -->  onStop  -->  onDestroyView -->  onDetach
+
+
+
+setUserVisibleHint 是当Fragment 真正被用户可见时才会返回true;
+
+
+所以
+第一步：  需要重写setUserVisibleHint 方法：判断是否对对用户可见；再去加载数据；
+
+             if (b){
+                 //加载数据
+                 onFragmentLoad()
+             }else{
+                 //停止加载
+                 onFragmentLoadStop()
+             }
+
+    但由于setUserVisibleHint  执行顺序在onCreateView 之前，也就是加载视图之前；若此时如加载数据则会出现异常；
+
+ 第二步：  var  isViewCreate = false;  创建标志位让布局加载完成之后再去请求数据；
+
+         if (rootView == null) {
+              rootView = inflater.inflate(getLayoutRes(), container, false)
+         }
+         isViewCreate = true //布局加载完成，
+
+
+
+ 第三步： 由于setUserVisibleHint 方法的执行顺序在生命周期之前，在布局加载完成之后再次去手动分发：
+
+             if (userVisibleHint) {
+                 // 手动来分发下
+                 userVisibleHint = true
+             }
+
+  此时，问题还未完全解决，再切换底部tab 时，我们发现，会出现重复的操作；
+  这里我们需要理解一个概念：当fragment 是从可见到不可见才去停止操作；当fragment从不可见到可见才去开始请求操作；
+
+  于是
+
+  第四步： 记录上一次的状态：   var isVisibleToUserLast = false  //记录上一次状态的标志位；
+   在分发时拿该标志为判断；
+
+            if (isVisibleToUser  && !isVisibleToUserLast ) {
+                  // 此时可见，上一次不可见， 才开始操作
+                   dispatchUserVisibleHint(true)
+
+               } else if (!isVisibleToUser && isVisibleToUserLast) {
+                   //此时不可见，上一次可见  才停止操作；
+                   dispatchUserVisibleHint(false)
+               }
+
+   并在    dispatchUserVisibleHint 方法中更新标志位isVisibleToUserLast 的状态；
+
+
+       private fun dispatchUserVisibleHint(b: Boolean) {
+           //改变标志位的状态
+           isVisibleToUserLast = b
+
+           if (b) {
+               onFragmentLoad()
+           } else {
+               onFragmentLoadStop()
+           }
+
+         }
+
+  此时如果我们从fragment 跳转到另外一个Activity ,按照我们的臆想：fragment 应该停止一切操作，从activity 回来时开始操作，但
+  事实并非如此，从日志可以看出，跳转到另一个activity时，fragment 并未停止操作，回来时也未开始操作；
+   但从日志中可以看出，fragment 中执行了 onResume 方法和 onPause 方法；
+
+
+   所以第五步： 再次进行分发 这里是根据从可见到不可见，不可见到可见进行分发 //这里没有执行setUserVisibleHint 是因为该方法非生命周期函数，他是在
+         viewPager 的populate 方法中执行的；
+
+        override fun onResume() {
+               super.onResume()
+             if (userVisibleHint && !isVisibleToUserLast){
+                 dispatchUserVisibleHint(true)
+             }
+
+         }
+
+         override fun onPause() {
+             super.onPause()
+             E("onPause")
+             if (userVisibleHint && isVisibleToUserLast){
+                 dispatchUserVisibleHint(false)
+             }
+         }
+
+  最后，终极boss 出现， 双层嵌套；
+
+  第六步：  即：Activity(  ViewPager ( fragment  (ViewPager (fragment ))))
+
+    对于这种布局， 典型的今日头条的新闻布局；
+
+      例：在MyFragment2 中嵌套了 viewPager  ,viewPager 中嵌套了 四个Fragment;
+
+      1. 当运行程序，查看日志发现，tab默认为1时： MyFragment2 中的的第一个嵌套Fragment 也开始了加载操作；但此时它的父Fragment 并不可见，这
+       显然并不是我们想要的；
+
+       这里我们就需要在父类不可见时将加载操作拦截掉；
+
+          isParentInvisible // true :父类不可见；false :父类可见
+
+             if (visibleState && isParentInvisible()) {
+                   return;
+               }
+
+           // TODO 判断 父控件 是否可见， 什么意思？ 例如：  Fragment2_vp1子Fragment  的  父亲/父控件==Fragment2
+           private boolean isParentInvisible() {
+               Fragment parentFragment = getParentFragment();
+               if (parentFragment instanceof LazyFragment5) {
+                   LazyFragment5 fragment = (LazyFragment5) parentFragment;
+                   return !fragment.isVisibleStateUP;
+               }
+               return false;
+           }
+
+
+          这样就解决了在加载MyFragment1时 ，Fragment2_vp_1也进行预加载的问题；
+
+
+       2.但是当我们再切换底部tab时；Fragment2可见时，Fragment2_vp_1也未进行加载操作；此时需要再次进行分发；
+
+    //分发嵌套的子View
+      protected open fun dispatchChildVisibleState(state: Boolean) {
+        val fragmentManager: FragmentManager = childFragmentManager
+        val fragments: List<Fragment> = fragmentManager.getFragments()
+        if (fragments != null) {
+            for (fragment in fragments) { // 循环遍历 嵌套里面的 子 Fragment 来分发事件操作
+                if (fragment is BaseLoadFragment && !fragment.isHidden && fragment.userVisibleHint) {
+                    (fragment as BaseLoadFragment).dispatchUserVisibleHint(state)
+                }
+            }
+        }
+    }
+
+    //进行分发
+         if (b) {
+                onFragmentLoad()
+                dispatchChildVisibleState(true)
+            } else {
+                onFragmentLoadStop()
+                dispatchChildVisibleState(true)
+            }
+
+
+
+完成！！！！！
+
